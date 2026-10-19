@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TaskFlow Dashboard</title>
+<style>
+  :root { --bg:#f5f6fa; --card:#fff; --text:#1c1e26; --muted:#6b7280; --line:#e5e7eb; --accent:#4f46e5; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#12131a; --card:#1c1e28; --text:#e8e9ef; --muted:#9aa0b0; --line:#2c2f3d; --accent:#818cf8; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:20px; background:var(--bg); color:var(--text); font-family:system-ui,Segoe UI,Roboto,sans-serif; }
+  h1 { margin:0 0 4px; font-size:22px; } .sub { color:var(--muted); margin-bottom:16px; font-size:14px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:10px; margin-bottom:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; }
+  .card .n { font-size:24px; font-weight:600; } .card .l { font-size:12px; color:var(--muted); }
+  .bar { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:9px 12px; font-size:13px; cursor:pointer; }
+  button.alt { background:transparent; color:var(--text); border:1px solid var(--line); }
+  .wrap { overflow-x:auto; background:var(--card); border:1px solid var(--line); border-radius:10px; margin-bottom:16px; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--muted); font-weight:500; } td.err { white-space:normal; max-width:280px; }
+  .b { padding:2px 8px; border-radius:99px; font-size:12px; font-weight:600; }
+  .pending{background:#e5e7eb;color:#374151} .running{background:#dbeafe;color:#1d4ed8}
+  .retrying{background:#fef3c7;color:#b45309} .completed{background:#dcfce7;color:#15803d}
+  .failed{background:#fee2e2;color:#b91c1c} .rec{background:#ede9fe;color:#6d28d9}
+  #log { font-family:ui-monospace,Consolas,monospace; font-size:12px; padding:10px; max-height:220px; overflow:auto; }
+  #log div { padding:2px 0; color:var(--muted); } #log b { color:var(--text); font-weight:600; }
+</style>
+</head>
+<body>
+<h1>TaskFlow</h1>
+<div class="sub">Failure-aware asynchronous job runner &middot; auto-refresh every 2s</div>
+
+<div class="cards" id="cards"></div>
+
+<div class="bar">
+  <button onclick="sub('send_email',{to:'user@example.com'})">Normal job</button>
+  <button onclick="sub('flaky',{fail_times:2})">Temporary failure</button>
+  <button onclick="sub('always_fail',{})">Repeated failure</button>
+  <button onclick="dup()">Duplicate x3</button>
+  <button onclick="sub('long_task',{seconds:8})">Long job (crash demo)</button>
+  <button class="alt" onclick="post('/recover')">Run recovery now</button>
+  <button class="alt" onclick="reset()">Reset</button>
+</div>
+
+<div class="wrap"><table>
+  <thead><tr><th>ID</th><th>Task</th><th>Status</th><th>Retries</th><th>Recovered</th><th>Time (s)</th><th>Error / Result</th></tr></thead>
+  <tbody id="rows"></tbody>
+</table></div>
+
+<div class="card"><div class="l" style="margin-bottom:6px">Event log</div><div id="log"></div></div>
+
+<script>
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function post(url, body) {
+  await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: body ? JSON.stringify(body) : undefined});
+  refresh();
+}
+const sub = (task_type, payload, request_key=null) => post('/jobs', {task_type, payload, request_key});
+function dup() { const k = 'dup-' + Date.now(); for (let i=0;i<3;i++) sub('generate_report', {seconds:2}, k); }
+function reset() { if (confirm('Clear all jobs?')) post('/reset'); }
+
+async function refresh() {
+  try {
+    const [jobs, m, ev] = await Promise.all(['/jobs','/metrics','/events'].map(u => fetch(u).then(r => r.json())));
+    const c = [
+      [m.total,'Total jobs'],[m.completed,'Completed'],[m.failed,'Failed'],[m.running,'Running'],[m.queued,'Queued / retrying'],
+      [m.total_retries,'Retries'],[m.completion_rate+'%','Completion rate'],[m.recovered_jobs,'Recovered jobs'],
+      [m.recovery_rate+'%','Recovery rate'],[m.avg_processing_delay_s+'s','Avg delay'],
+      [m.duplicate_submissions_blocked,'Duplicates blocked'],[m.duplicate_executions,'Duplicate executions']];
+    document.getElementById('cards').innerHTML = c.map(([n,l]) => `<div class="card"><div class="n">${esc(n)}</div><div class="l">${l}</div></div>`).join('');
+    document.getElementById('rows').innerHTML = jobs.map(j => {
+      const t = j.finished_at ? (j.finished_at - j.created_at).toFixed(1) : '-';
+      return `<tr><td>${esc(j.id)}</td><td>${esc(j.task_type)}</td><td><span class="b ${j.status}">${j.status}</span></td>
+        <td>${j.retries}/${j.max_retries}</td><td>${j.recovered ? '<span class="b rec">recovered</span>' : '-'}</td>
+        <td>${t}</td><td class="err">${esc(j.error || j.result || '')}</td></tr>`;
+    }).join('');
+    document.getElementById('log').innerHTML = ev.map(e =>
+      `<div>${new Date(e.ts*1000).toLocaleTimeString()} <b>${esc(e.job_id)}</b> ${esc(e.message)}</div>`).join('');
+  } catch (e) { console.error(e); }
+}
+refresh(); setInterval(refresh, 2000);
+</script>
+</body>
+</html>
